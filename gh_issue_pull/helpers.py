@@ -1,51 +1,34 @@
+import os
 import sqlite3
 from pathlib import Path
-from classes import SWEBenchEntry, ProblemStatement
-import polars as pl
+from typing import Final
+
 import openai
+import polars as pl
+from dotenv import load_dotenv
 
-client = openai.Client(api_key="adsd")
-db_path = Path('../swebench_entries.db')
+from classes import SWEBenchEntry
 
-def reset_all_used_flags():
-    # Open the database
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+load_dotenv(override=True)
 
-    # Flip the USED flag for all entries
-    cursor.execute('''
-    UPDATE swebench_entries SET USED = 0
-    ''')
-
-    # Commit changes and close connection
-    conn.commit()
-    conn.close()
-
-    print(f"All USED flags have been flipped in {db_path}")
-
+SWEBENCH_DB_PATH: Final[Path] = Path('../swebench_entries.db')
+OPENAI_CLIENT = openai.Client(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def fetch_unused_issue() -> SWEBenchEntry:
     # Select a random issue with the USED flag set to False
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(SWEBENCH_DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute('''
-    SELECT * FROM swebench_entries WHERE USED = 0 ORDER BY RANDOM() LIMIT 1
-    ''')
+    cursor.execute(
+        '''
+            SELECT * FROM swebench_entries ORDER BY RANDOM() LIMIT 1
+            '''
+        )
 
     issue = cursor.fetchone()
 
-    if issue is None:
-        reset_all_used_flags()
-        return fetch_unused_issue()
-
     columns = [description[0] for description in cursor.description]
-
-    # Mark the issue as used
-    cursor.execute('''
-    UPDATE swebench_entries SET USED = 1 WHERE instance_id = ?
-    ''', (issue[0],))
 
     conn.commit()
     conn.close()
@@ -54,30 +37,23 @@ def fetch_unused_issue() -> SWEBenchEntry:
 
     return SWEBenchEntry.model_validate(issue)
 
-def obfuscate(swebench_entry: SWEBenchEntry):
+
+def obfuscate(swebench_entry: SWEBenchEntry) -> str:
     """Rephrases the problem statement in a way that is still very clear but makes it hard to know what the original problem statement was."""
-    # response = client.chat.completions.create(
-    #     model="gpt-3.5-turbo",
-    #     messages=[
-    #         {"role": "system", "content": "You are a program that rephrases problem statements in a way that is still very clear but makes it hard to know what the original problem statement was."},
-    #         {"role": "user", "content": f"Please rephrase the following problem statement:\n\n{swebench_entry.problem_statement}"}
-    #     ]
-    # )
-    return "response.choices[0].message.content"
-
-def convert_swebench_entry_to_problem_statement(swebench_entry: SWEBenchEntry) -> ProblemStatement:
-    obfuscated_statement = obfuscate(swebench_entry)
-
-    return ProblemStatement(
-        problem_statement=obfuscated_statement,
-        repo=swebench_entry.repo,
-        repo_download_url=f"https://github.com/{swebench_entry.repo}.git",
-        base_commit=swebench_entry.base_commit,
-        hints_text=swebench_entry.hints_text,
+    print(f"Obfuscating issue {swebench_entry.instance_id}...")
+    response = OPENAI_CLIENT.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a program that rephrases problem statements in a way that is still very clear but makes it hard to know what the original problem statement was."},
+            {"role": "user", "content": f"Please rephrase the following problem statement:\n\n{swebench_entry.problem_statement}"}
+        ]
     )
+    print(f"Finished obfuscating issue {swebench_entry.instance_id}")
+    return response.choices[0].message.content
 
 
 def pull_all_swebench_entries():
+    print(f"Pulling all SWEBench entries to {SWEBENCH_DB_PATH}")
     # Define the splits
     splits = {
         'train': 'data/train-*.parquet',
@@ -87,52 +63,58 @@ def pull_all_swebench_entries():
     }
 
     # Create a SQLite database
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(SWEBENCH_DB_PATH)
     cursor = conn.cursor()
 
     # Create the table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS swebench_entries (
-        instance_id TEXT PRIMARY KEY,
-        text TEXT,
-        repo TEXT,
-        base_commit TEXT,
-        problem_statement TEXT,
-        hints_text TEXT,
-        created_at TEXT,
-        patch TEXT,
-        test_patch TEXT,
-        version TEXT,
-        FAIL_TO_PASS TEXT,
-        PASS_TO_PASS TEXT,
-        environment_setup_commit TEXT
-    )
-   ''')
+    cursor.execute(
+        '''
+            CREATE TABLE IF NOT EXISTS swebench_entries (
+                instance_id TEXT PRIMARY KEY,
+                text TEXT,
+                repo TEXT,
+                base_commit TEXT,
+                problem_statement TEXT,
+                hints_text TEXT,
+                created_at TEXT,
+                patch TEXT,
+                test_patch TEXT,
+                version TEXT,
+                FAIL_TO_PASS TEXT,
+                PASS_TO_PASS TEXT,
+                environment_setup_commit TEXT
+            )
+           '''
+        )
 
     # Read and insert data from each split
     for split, path in splits.items():
         df = pl.read_parquet(f'hf://datasets/princeton-nlp/SWE-bench_oracle/{path}')
 
         for row in df.iter_rows(named=True):
-            cursor.execute('''
-            INSERT OR REPLACE INTO swebench_entries VALUES (
-                :instance_id, :text, :repo, :base_commit, :problem_statement,
-                :hints_text, :created_at, :patch, :test_patch, :version,
-                :FAIL_TO_PASS, :PASS_TO_PASS, :environment_setup_commit
-            )
-            ''', row)
+            cursor.execute(
+                '''
+                            INSERT OR REPLACE INTO swebench_entries VALUES (
+                                :instance_id, :text, :repo, :base_commit, :problem_statement,
+                                :hints_text, :created_at, :patch, :test_patch, :version,
+                                :FAIL_TO_PASS, :PASS_TO_PASS, :environment_setup_commit
+                            )
+                            ''', row
+                )
 
     # Commit changes and close connection
     conn.commit()
     conn.close()
 
-    print(f"All SWEBench entries have been pulled and stored in {db_path}")
+    print(f"All SWEBench entries have been pulled and stored in {SWEBENCH_DB_PATH}")
+
 
 import requests
 import boto3
 import os
 from urllib.parse import urlparse
 from botocore.exceptions import NoCredentialsError, ClientError
+
 
 def upload_repo_at_given_commit(repo_url, commit_hash, bucket_name):
     """
@@ -191,19 +173,20 @@ def upload_repo_at_given_commit(repo_url, commit_hash, bucket_name):
     os.remove(archive_name)
     print(f"Cleaned up local file {archive_name}.")
 
+
 def fetch_all_repos():
     # Fetch all repositories from the database
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(SWEBENCH_DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute('''
-    SELECT repo, base_commit FROM swebench_entries
-    ''')
+    cursor.execute(
+        '''
+            SELECT repo, base_commit FROM swebench_entries
+            '''
+        )
 
     for repo, base_commit in cursor.fetchall():
         repo_url = f"https://github.com/{repo}"
         upload_repo_at_given_commit(repo_url, base_commit, "codeatcommits")
 
     conn.close()
-
-fetch_all_repos()
