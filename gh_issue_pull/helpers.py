@@ -1,3 +1,4 @@
+import ast
 import os
 import sqlite3
 from pathlib import Path
@@ -34,6 +35,9 @@ def fetch_unused_issue() -> SWEBenchEntry:
     conn.close()
 
     issue = dict(zip(columns, issue))
+
+    issue["FAIL_TO_PASS"] = ast.literal_eval(issue["FAIL_TO_PASS"])
+    issue["PASS_TO_PASS"] = ast.literal_eval(issue["PASS_TO_PASS"])
 
     return SWEBenchEntry.model_validate(issue)
 
