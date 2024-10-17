@@ -1,0 +1,3 @@
+[submodule "analysis/SWEBench"]
+	path = analysis/SWEBench
+	url = https://github.com/princeton-nlp/SWE-Bench
